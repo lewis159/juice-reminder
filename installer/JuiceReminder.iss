@@ -1,11 +1,16 @@
 ; Inno Setup script for Juice Reminder.
 ; Build with: powershell -File ..\Build-Installer.ps1
+; (the build script passes /DAppVersion=... read from JuiceReminder.ps1)
+
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
 
 #define AppName        "Juice Reminder"
-#define AppVersion     "1.0.0"
 #define AppPublisher   "Ben Percival"
 #define AppUrl         "https://github.com/lewis159/juice-reminder"
 #define LauncherVbs    "Start-JuiceReminder.vbs"
+#define HelperScript   "SetupHelper.ps1"
 
 [Setup]
 AppId={{F2A6D5D0-9690-4E54-AAC9-F803604EEE80}
@@ -24,6 +29,7 @@ OutputDir=..\dist
 OutputBaseFilename=JuiceReminderSetup
 SetupIconFile=..\assets\juice.ico
 UninstallDisplayIcon={app}\juice.ico
+VersionInfoVersion={#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -40,13 +46,20 @@ Source: "..\JuiceReminder.ps1";        DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Start-JuiceReminder.vbs";  DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md";                DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\juice.ico";         DestDir: "{app}"; Flags: ignoreversion
+; Installed so the uninstaller can use it too; also extracted early during setup.
+Source: "{#HelperScript}";             DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#LauncherVbs}"""; \
     WorkingDir: "{app}"; IconFilename: "{app}\juice.ico"; Comment: "Hourly reminder to drink your juice"
+Name: "{group}\Juice Reminder log"; Filename: "C:\JuiceReminder\logs"; Comment: "Folder containing juice-reminder.log"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{userstartup}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#LauncherVbs}"""; \
     WorkingDir: "{app}"; IconFilename: "{app}\juice.ico"; Tasks: startupicon
+
+[Dirs]
+; Logs are user data: created here, deliberately left behind on uninstall.
+Name: "C:\JuiceReminder\logs"; Flags: uninsneveruninstall
 
 [Run]
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#LauncherVbs}"""; WorkingDir: "{app}"; \
@@ -56,29 +69,34 @@ Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#LauncherVbs}"""; WorkingDi
 Type: files; Name: "{userstartup}\{#AppName}.lnk"
 
 [Code]
-{ Stops any copy of the reminder that is already running, so an upgrade or an
-  uninstall is not left fighting a process that holds the old script open. }
-procedure StopRunningReminder();
+{ SetupHelper.ps1 does the real work (stopping running copies, removing the old
+  script-based install) and logs it to C:\JuiceReminder\logs. }
+procedure RunSetupHelper(const ScriptPath, Action: String);
 var
   ResultCode: Integer;
 begin
-  Exec(ExpandConstant('{cmd}'), '/C taskkill /F /FI "IMAGENAME eq powershell.exe" ' +
-       '/FI "WINDOWTITLE eq Juice time" >nul 2>&1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-       '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Get-CimInstance Win32_Process ' +
-       '-Filter ""Name = ''powershell.exe''"" | Where-Object { $_.CommandLine -like ''*-File *JuiceReminder.ps1*'' } | ' +
-       'ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + ScriptPath + '"' +
+      ' -Action ' + Action +
+      ' -InstallDir "' + ExpandConstant('{app}') + '"' +
+      ' -Version "{#AppVersion}"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log('SetupHelper could not be started: ' + SysErrorMessage(ResultCode));
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  { ssInstall runs before files and shortcuts are written, so old Startup
+    shortcuts are gone before the new one is created. }
   if CurStep = ssInstall then
-    StopRunningReminder();
+  begin
+    ExtractTemporaryFile('{#HelperScript}');
+    RunSetupHelper(ExpandConstant('{tmp}\{#HelperScript}'), 'Install');
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
-    StopRunningReminder();
+    RunSetupHelper(ExpandConstant('{app}\{#HelperScript}'), 'Uninstall');
 end;

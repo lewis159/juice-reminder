@@ -4,6 +4,8 @@
     Usage:
       powershell -ExecutionPolicy Bypass -File JuiceReminder.ps1
       powershell -ExecutionPolicy Bypass -File JuiceReminder.ps1 -TestNow
+
+    Activity is logged to C:\JuiceReminder\logs\juice-reminder.log.
 #>
 
 [CmdletBinding()]
@@ -14,17 +16,40 @@ param(
     # Minutes to wait when the user hits Snooze.
     [int]$SnoozeMinutes = 10,
 
+    # Folder for juice-reminder.log. Rolls over at 1 MB, keeping one old file.
+    [string]$LogDir = 'C:\JuiceReminder\logs',
+
     # Show one popup straight away and exit (for previewing the design).
     [switch]$TestNow
 )
+
+# Read by Build-Installer.ps1 to stamp the installer version.
+$AppVersion = '1.1.0'
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# Only ever one copy running, even if Windows launches it twice.
-$mutex = New-Object System.Threading.Mutex($false, 'Global\JuiceReminderSingleInstance')
-if (-not $mutex.WaitOne(0, $false)) { return }
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = 'INFO'
+    )
+
+    # Logging must never take the reminder down, so every failure is swallowed.
+    try {
+        if (-not (Test-Path $LogDir)) {
+            New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+        }
+        $path = Join-Path $LogDir 'juice-reminder.log'
+        if ((Test-Path $path) -and (Get-Item $path).Length -ge 1MB) {
+            Move-Item -Path $path -Destination "$path.1" -Force
+        }
+        $line = '{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}' -f (Get-Date), $Level, $Message
+        Add-Content -Path $path -Value $line -Encoding UTF8
+    }
+    catch { }
+}
 
 function Show-JuiceReminder {
     $form                  = New-Object System.Windows.Forms.Form
@@ -127,24 +152,50 @@ function Show-JuiceReminder {
     return $result
 }
 
+# A preview never takes the single-instance lock, so it still works while the
+# real reminder is running.
+if ($TestNow) {
+    Write-Log "Test popup opened (v$AppVersion, PID $PID)."
+    $answer = Show-JuiceReminder
+    Write-Log "Test popup closed with $answer."
+    return
+}
+
+# Only ever one copy running, even if Windows launches it twice.
+$mutex = New-Object System.Threading.Mutex($false, 'Global\JuiceReminderSingleInstance')
+if (-not $mutex.WaitOne(0, $false)) {
+    Write-Log "Another copy is already running; exiting (PID $PID)."
+    $mutex.Dispose()
+    return
+}
+
 try {
-    if ($TestNow) {
-        Show-JuiceReminder | Out-Null
-        return
-    }
+    Write-Log "Started v$AppVersion (PID $PID). Every $IntervalMinutes min, snooze $SnoozeMinutes min. Script: $PSCommandPath"
 
     $wait = $IntervalMinutes
     while ($true) {
         Start-Sleep -Seconds ($wait * 60)
-        $answer = Show-JuiceReminder
+
+        Write-Log 'Reminder shown.'
+        $shownAt = Get-Date
+        $answer  = Show-JuiceReminder
+        $seconds = [int]((Get-Date) - $shownAt).TotalSeconds
+
         if ($answer -eq [System.Windows.Forms.DialogResult]::Retry) {
             $wait = $SnoozeMinutes
+            Write-Log "Snoozed after $seconds s. Next reminder in $wait min."
         } else {
             $wait = $IntervalMinutes
+            Write-Log "OK clicked after $seconds s. Next reminder in $wait min."
         }
     }
 }
+catch {
+    Write-Log "Crashed: $($_.Exception.Message)" 'ERROR'
+    throw
+}
 finally {
+    Write-Log 'Stopped.'
     $mutex.ReleaseMutex()
     $mutex.Dispose()
 }

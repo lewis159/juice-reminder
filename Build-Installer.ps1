@@ -1,5 +1,6 @@
 <#
     Regenerates the icon and compiles dist\JuiceReminderSetup.exe with Inno Setup.
+    The installer version is read from $AppVersion in JuiceReminder.ps1.
 
     Inno Setup 6 is required:  winget install --id JRSoftware.InnoSetup
 #>
@@ -25,11 +26,18 @@ if (-not $Iscc) {
     throw "ISCC.exe not found. Install Inno Setup 6 (winget install --id JRSoftware.InnoSetup) or pass -Iscc."
 }
 
+$scriptText = Get-Content -Raw -Path (Join-Path $root 'JuiceReminder.ps1')
+if ($scriptText -notmatch "\`$AppVersion\s*=\s*'([^']+)'") {
+    throw "Could not find `$AppVersion = '...' in JuiceReminder.ps1."
+}
+$version = $Matches[1]
+
 & (Join-Path $root 'tools\New-JuiceIcon.ps1')
 
-& $Iscc (Join-Path $root 'installer\JuiceReminder.iss')
+& $Iscc "/DAppVersion=$version" (Join-Path $root 'installer\JuiceReminder.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE." }
 
 $setup = Join-Path $root 'dist\JuiceReminderSetup.exe'
 Write-Host ""
-Write-Host "Built $setup ($([math]::Round((Get-Item $setup).Length / 1MB, 2)) MB)"
+Write-Host "Built $setup v$version ($([math]::Round((Get-Item $setup).Length / 1MB, 2)) MB)"
+Write-Host "SHA-256 $((Get-FileHash $setup -Algorithm SHA256).Hash)"
