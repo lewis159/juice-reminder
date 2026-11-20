@@ -107,9 +107,13 @@ hand once.)
 
   If either check fails, the file is deleted, nothing is installed, and the
   reason is logged.
-- **Install automatically:** the update installs silently right after you next
-  click **OK** on a reminder, so a restart never cuts a wait short. Setup stops
-  the old version and starts the new one; settings are kept.
+- **Install automatically:** as soon as the update is downloaded and checked,
+  it installs silently (never while a reminder or the settings window is
+  open; it waits for those to close). Setup stops the old version and starts
+  the new one, which shows a "updated to version X" notification. Settings are
+  kept, and so is the reminder schedule: the next reminder comes when it was
+  already due, and a snooze or pause carries over. (1.4.0 and older wait for
+  the next **OK** click instead.)
 - **Ask me first:** a notification says a new version is available. Click it,
   or right-click the tray icon → **Install update X now**.
 - **Don't check:** no automatic checks. **Check for updates** in the tray menu

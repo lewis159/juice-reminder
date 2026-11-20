@@ -36,7 +36,7 @@ param(
 )
 
 # Read by Build-Installer.ps1 to stamp the installer version.
-$AppVersion = '1.4.0'
+$AppVersion = '1.4.1'
 
 # Updates are only installed if the installer is Authenticode-signed by one of
 # these certificates (SHA-1 thumbprints). The key lives on the release machine;
@@ -55,6 +55,9 @@ $UpdateDir        = Join-Path $env:TEMP 'JuiceReminderUpdate'
 
 if (-not $SettingsPath) { $SettingsPath = Join-Path $env:APPDATA 'JuiceReminder\settings.json' }
 if (-not $LogDir)       { $LogDir       = Join-Path $env:LOCALAPPDATA 'JuiceReminder\logs' }
+
+# Reminder schedule handed from the old version to the new one during an update.
+$StatePath = Join-Path (Split-Path -Parent $LogDir) 'update-state.json'
 
 # The only reminder frequencies offered. Anything else in the settings file is ignored.
 $IntervalChoices = @(30, 60, 120)
@@ -837,12 +840,6 @@ function Invoke-Reminder {
             $script:waitMinutes = $script:appSettings.IntervalMinutes
             $how = if ($answer -eq [System.Windows.Forms.DialogResult]::OK) { 'OK clicked' } else { "Closed ($answer)" }
             Write-Log "$how after $seconds s. Next reminder in $($script:waitMinutes) min."
-
-            # Automatic updates install right after a reminder is dismissed, so
-            # the restart never cuts a wait short.
-            if ($script:appSettings.UpdateMode -eq 'Auto' -and $script:update -and $script:update.File) {
-                Install-Update
-            }
         }
     }
     catch {
@@ -963,10 +960,59 @@ function Complete-UpdateDownload {
     Write-Log "Update v$($u.Version) downloaded; checksum and signature verified: $file"
     Update-UpdateMenu
 
-    if ($script:installWhenReady) {
+    # Auto mode installs straight away. Invoke-Tick never runs while a reminder
+    # or the settings window is open, so this can't interrupt either; the
+    # reminder schedule carries over to the new version (see Save-UpdateState).
+    if ($script:installWhenReady -or $script:appSettings.UpdateMode -eq 'Auto') {
         Install-Update
-    } elseif ($script:appSettings.UpdateMode -eq 'Auto') {
-        Show-TrayMessage "Version $($u.Version) will install after your next reminder."
+    }
+}
+
+function Save-UpdateState {
+    <#
+        Saves the reminder schedule just before an update restarts the app, so
+        the new version carries on where this one left off.
+    #>
+    try {
+        $dir = Split-Path -Parent $StatePath
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [pscustomobject]@{
+            FromVersion = $AppVersion
+            ToVersion   = [string]$script:update.Version
+            SavedAt     = (Get-Date).ToString('o')
+            Anchor      = $script:anchor.ToString('o')
+            WaitMinutes = $script:waitMinutes
+            Snoozed     = $script:snoozed
+            Paused      = $script:paused
+        } | ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
+    }
+    catch { Write-Log "Could not save the reminder schedule before updating: $($_.Exception.Message)" 'WARN' }
+}
+
+function Restore-UpdateState {
+    <#
+        If this start follows an update (state saved under 15 minutes ago),
+        restores the reminder schedule and returns the version updated from.
+        Always deletes the state file. Returns $null otherwise.
+    #>
+    if (-not (Test-Path -LiteralPath $StatePath)) { return $null }
+    try {
+        $st = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+        $saved = [datetime]::Parse($st.SavedAt, $null, [Globalization.DateTimeStyles]::RoundtripKind)
+        if (((Get-Date) - $saved).TotalMinutes -gt 15) { return $null }
+
+        $script:anchor      = [datetime]::Parse($st.Anchor, $null, [Globalization.DateTimeStyles]::RoundtripKind)
+        $script:waitMinutes = [double]$st.WaitMinutes
+        $script:snoozed     = [bool]$st.Snoozed
+        $script:paused      = [bool]$st.Paused
+        return [string]$st.FromVersion
+    }
+    catch {
+        Write-Log "Could not restore the reminder schedule after updating: $($_.Exception.Message)" 'WARN'
+        return $null
+    }
+    finally {
+        Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -986,12 +1032,14 @@ function Install-Update {
 
     $setupLog = Join-Path $UpdateDir 'setup.log'
     Write-Log "Installing update v$($u.Version). Setup's own log: $setupLog"
+    Save-UpdateState
     try {
         Start-Process -FilePath $u.File -ErrorAction Stop -ArgumentList @(
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/RESTARTAPP=1', "/LOG=`"$setupLog`"")
     }
     catch {
         Write-Log "Could not start the update: $($_.Exception.Message)" 'ERROR'
+        Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
         return
     }
 
@@ -1024,6 +1072,7 @@ function Invoke-UpdateWork {
     if ($script:installing -and ((Get-Date) - $script:installStarted).TotalMinutes -ge 3) {
         $script:installing   = $false
         $script:tray.Visible = $true
+        Remove-Item -LiteralPath $StatePath -Force -ErrorAction SilentlyContinue
         Write-Log "Update v$($script:update.Version) did not complete within 3 minutes; still running v$AppVersion. See $(Join-Path $UpdateDir 'setup.log')." 'WARN'
     }
 
@@ -1112,7 +1161,13 @@ try {
         $script:snoozed     = $true   # keep the test delay even if settings change
     }
 
+    $updatedFrom = Restore-UpdateState
+
     Write-Log "Started v$AppVersion (PID $PID). $(Get-SettingsSummary $script:appSettings). Settings: $SettingsPath. Script: $PSCommandPath"
+    if ($updatedFrom) {
+        $paused = if ($script:paused) { ' Reminders are still paused.' } else { '' }
+        Write-Log ("Updated from v$updatedFrom. Reminder schedule kept: next reminder at {0:HH:mm}.$paused" -f (Get-NextDue))
+    }
 
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $script:miNext = $menu.Items.Add('Next reminder:')
@@ -1172,6 +1227,9 @@ try {
     })
     Update-TrayText
     $script:tray.Visible = $true
+    if ($updatedFrom -and $updatedFrom -ne $AppVersion) {
+        Show-TrayMessage "Juice Reminder updated to version $AppVersion."
+    }
 
     # Check the clock every 15 s rather than sleeping for a whole interval:
     # sleep timers stop while the PC is asleep, the clock does not.

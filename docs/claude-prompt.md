@@ -27,9 +27,13 @@ is Windows 11). Read `README.md` first, then the files it lists.
   errors; rolls over at 1 MB). Before 1.2.0 the log was in `C:\JuiceReminder\logs`.
 - It updates itself (from 1.3.0): checks `latest.json` on the latest GitHub
   release 2 min after start and daily, downloads the installer, verifies its
-  SHA-256, and runs it with `/VERYSILENT /RESTARTAPP=1` (Auto: after the next
-  OK click; Notify: when the user clicks Install). Network work runs in a
-  background runspace polled by the 15 s timer.
+  SHA-256 and signature, and runs it with `/VERYSILENT /RESTARTAPP=1` (Auto:
+  as soon as it's verified; Notify: when the user clicks Install). Network work
+  runs in a background runspace polled by the 15 s timer.
+- Before running setup it saves the reminder schedule (anchor, wait, snooze,
+  pause) to `%LocalAppData%\JuiceReminder\update-state.json`; the new version
+  restores it if under 15 min old, then deletes the file. Tray-section
+  functions are after the dot-source guard, so tests load them from the AST.
 - From 1.4.0 the installer is Authenticode-signed with a self-signed
   certificate (`CN=Juice Reminder Release Signing`, thumbprint
   `4D1E8C6F2D423271B9A0E70A3127F38A353C63B2`) whose key is in
