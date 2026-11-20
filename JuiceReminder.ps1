@@ -29,11 +29,21 @@ param(
 
     # For testing: show the first reminder after this many seconds instead of
     # waiting a full interval.
-    [int]$StartDelaySeconds = 0
+    [int]$StartDelaySeconds = 0,
+
+    # Seconds after start before the first update check (keeps login quick).
+    [int]$UpdateCheckDelaySeconds = 120
 )
 
 # Read by Build-Installer.ps1 to stamp the installer version.
-$AppVersion = '1.2.0'
+$AppVersion = '1.3.0'
+
+# Where the app looks for updates. Build-Installer.ps1 writes latest.json and it
+# is uploaded with each GitHub release; this URL always serves the newest one.
+# Can be overridden with UpdateUrl in the settings file.
+$DefaultUpdateUrl = 'https://github.com/lewis159/juice-reminder/releases/latest/download/latest.json'
+$UpdateModes      = @('Auto', 'Notify', 'Off')
+$UpdateDir        = Join-Path $env:TEMP 'JuiceReminderUpdate'
 
 if (-not $SettingsPath) { $SettingsPath = Join-Path $env:APPDATA 'JuiceReminder\settings.json' }
 if (-not $LogDir)       { $LogDir       = Join-Path $env:LOCALAPPDATA 'JuiceReminder\logs' }
@@ -94,7 +104,19 @@ function New-DefaultSettings {
         SoundPath       = $DefaultSound
         SoundVolume     = 80
         SoundRepeat     = $false
+        UpdateMode      = 'Auto'
+        UpdateUrl       = $DefaultUpdateUrl
     }
+}
+
+function Test-UpdateUrlAllowed {
+    <# Updates only over HTTPS. Plain http is allowed for localhost, for testing. #>
+    param([string]$Url)
+
+    $u = $null
+    if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$u)) { return $false }
+    if ($u.Scheme -eq 'https') { return $true }
+    return ($u.Scheme -eq 'http' -and $u.IsLoopback)
 }
 
 function ConvertTo-IntOrNull {
@@ -145,6 +167,16 @@ function Read-Settings {
     $n = ConvertTo-IntOrNull $raw.SoundVolume
     if ($null -ne $n) { $s.SoundVolume = [math]::Max(0, [math]::Min(100, $n)) }
 
+    if ($null -ne $raw.UpdateMode) {
+        $mode = $UpdateModes | Where-Object { $_ -eq [string]$raw.UpdateMode } | Select-Object -First 1
+        if ($mode) { $s.UpdateMode = $mode }
+        else { Write-Log "Ignoring UpdateMode '$($raw.UpdateMode)': must be one of $($UpdateModes -join ', ')." 'WARN' }
+    }
+    if ($null -ne $raw.UpdateUrl) {
+        if (Test-UpdateUrlAllowed ([string]$raw.UpdateUrl)) { $s.UpdateUrl = [string]$raw.UpdateUrl }
+        else { Write-Log "Ignoring UpdateUrl '$($raw.UpdateUrl)': must be an https:// address." 'WARN' }
+    }
+
     return $s
 }
 
@@ -176,7 +208,109 @@ function Get-SettingsSummary {
         $sound = "sound '$(Split-Path -Leaf $Settings.SoundPath)' at $($Settings.SoundVolume)%"
         if ($Settings.SoundRepeat) { $sound += ', repeating' }
     }
-    return "Every $($Settings.IntervalMinutes) min, snooze $($Settings.SnoozeMinutes) min, $sound"
+    return "Every $($Settings.IntervalMinutes) min, snooze $($Settings.SnoozeMinutes) min, $sound, updates $($Settings.UpdateMode)"
+}
+
+# ----------------------------------------------------------------- updates ---
+
+function Test-UpdateManifest {
+    <#
+        Checks the text of latest.json against the running version. Returns
+        @{ Ok; Newer; Reason; Version; Url; Sha256; Notes }. Never throws.
+        Ok = the manifest is usable; Newer = it offers a later version.
+    #>
+    param([string]$Json, [string]$CurrentVersion)
+
+    $r = @{ Ok = $false; Newer = $false; Reason = ''; Version = $null; Url = $null; Sha256 = $null; Notes = '' }
+    try { $m = $Json | ConvertFrom-Json -ErrorAction Stop }
+    catch { $r.Reason = "not valid JSON ($($_.Exception.Message))"; return $r }
+    if ($null -eq $m) { $r.Reason = 'empty'; return $r }
+
+    $v = $null
+    if (-not [version]::TryParse([string]$m.version, [ref]$v)) { $r.Reason = "bad version '$($m.version)'"; return $r }
+    if (-not (Test-UpdateUrlAllowed ([string]$m.url))) { $r.Reason = "download URL '$($m.url)' is not https"; return $r }
+    if ([string]$m.sha256 -notmatch '^[0-9A-Fa-f]{64}$') { $r.Reason = 'missing or bad sha256'; return $r }
+
+    $r.Ok      = $true
+    $r.Version = $v
+    $r.Url     = [string]$m.url
+    $r.Sha256  = ([string]$m.sha256).ToUpperInvariant()
+    if ($m.notes) { $r.Notes = [string]$m.notes }
+    $r.Newer   = $v -gt [version]$CurrentVersion
+    return $r
+}
+
+function Test-InstallerHash {
+    param([string]$Path, [string]$Sha256)
+
+    try {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash -eq $Sha256.ToUpperInvariant()
+    }
+    catch { return $false }
+}
+
+# Network work runs in a background runspace so the tray never freezes. Only one
+# job at a time; Invoke-Tick collects the result.
+$BackgroundCode = @{
+    Fetch = {
+        param($Url)
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $wc = New-Object Net.WebClient
+        $wc.Headers['User-Agent'] = 'JuiceReminder-Updater'
+        $wc.Encoding = [Text.Encoding]::UTF8
+        try { $wc.DownloadString($Url) } finally { $wc.Dispose() }
+    }
+    Download = {
+        param($Url, $Dest)
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $dir = Split-Path -Parent $Dest
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $wc = New-Object Net.WebClient
+        $wc.Headers['User-Agent'] = 'JuiceReminder-Updater'
+        try { $wc.DownloadFile($Url, $Dest) } finally { $wc.Dispose() }
+        $Dest
+    }
+}
+
+function Start-BackgroundJob {
+    param([string]$Kind, [object[]]$Arguments)
+
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript($BackgroundCode[$Kind].ToString())
+    foreach ($a in $Arguments) { [void]$ps.AddArgument($a) }
+    $script:job = @{ Kind = $Kind; PS = $ps; Handle = $ps.BeginInvoke(); Started = Get-Date }
+}
+
+function Receive-BackgroundJob {
+    <#
+        If the running job has finished, returns @{ Kind; Output; Error } and
+        clears it; otherwise $null. A job running over 5 minutes is abandoned.
+    #>
+    $j = $script:job
+    if (-not $j) { return $null }
+
+    $res = @{ Kind = $j.Kind; Output = $null; Error = $null }
+    if ($j.Handle.IsCompleted) {
+        try {
+            $out = $j.PS.EndInvoke($j.Handle)
+            if ($j.PS.Streams.Error.Count -gt 0) { $res.Error = $j.PS.Streams.Error[0].Exception.Message }
+            elseif ($out.Count -gt 0) { $res.Output = $out[$out.Count - 1] }
+        }
+        catch {
+            $e = $_.Exception
+            while ($e.InnerException) { $e = $e.InnerException }
+            $res.Error = $e.Message
+        }
+    } elseif (((Get-Date) - $j.Started).TotalMinutes -ge 5) {
+        try { $j.PS.Stop() } catch { }
+        $res.Error = 'timed out after 5 minutes'
+    } else {
+        return $null
+    }
+
+    try { $j.PS.Dispose() } catch { }
+    $script:job = $null
+    return $res
 }
 
 # ------------------------------------------------------------------- sound ---
@@ -388,7 +522,7 @@ function Show-SettingsDialog {
 
     $form                 = New-Object System.Windows.Forms.Form
     $form.Text            = 'Juice Reminder settings'
-    $form.ClientSize      = New-Object System.Drawing.Size(460, 344)
+    $form.ClientSize      = New-Object System.Drawing.Size(460, 398)
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox     = $false
     $form.MinimizeBox     = $false
@@ -469,9 +603,18 @@ function Show-SettingsDialog {
     $preview.SetBounds(170, 258, 100, 30)
     $form.Controls.Add($preview)
 
+    & $addLabel 'Updates' 306
+    $updateNames = @('Install automatically', 'Ask me first', "Don't check")   # same order as $UpdateModes
+    $updateBox = New-Object System.Windows.Forms.ComboBox
+    $updateBox.DropDownStyle = 'DropDownList'
+    $updateBox.SetBounds(170, 306, 180, 28)
+    foreach ($n in $updateNames) { [void]$updateBox.Items.Add($n) }
+    $updateBox.SelectedIndex = [math]::Max(0, [array]::IndexOf($UpdateModes, [string]$Current.UpdateMode))
+    $form.Controls.Add($updateBox)
+
     $save = New-Object System.Windows.Forms.Button
     $save.Text = 'Save'
-    $save.SetBounds(254, 300, 90, 32)
+    $save.SetBounds(254, 352, 90, 32)
     $save.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $save.BackColor = [System.Drawing.Color]::FromArgb(255, 176, 59)
     $save.FlatStyle = 'Flat'
@@ -480,7 +623,7 @@ function Show-SettingsDialog {
 
     $cancel = New-Object System.Windows.Forms.Button
     $cancel.Text = 'Cancel'
-    $cancel.SetBounds(350, 300, 90, 32)
+    $cancel.SetBounds(350, 352, 90, 32)
     $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $form.Controls.Add($cancel)
 
@@ -497,6 +640,8 @@ function Show-SettingsDialog {
             SoundPath       = $path
             SoundVolume     = $vol.Value
             SoundRepeat     = $repeat.Checked
+            UpdateMode      = $UpdateModes[$updateBox.SelectedIndex]
+            UpdateUrl       = $Current.UpdateUrl   # not shown; file-only
         }
     }
 
@@ -649,6 +794,12 @@ function Invoke-Reminder {
             $script:waitMinutes = $script:appSettings.IntervalMinutes
             $how = if ($answer -eq [System.Windows.Forms.DialogResult]::OK) { 'OK clicked' } else { "Closed ($answer)" }
             Write-Log "$how after $seconds s. Next reminder in $($script:waitMinutes) min."
+
+            # Automatic updates install right after a reminder is dismissed, so
+            # the restart never cuts a wait short.
+            if ($script:appSettings.UpdateMode -eq 'Auto' -and $script:update -and $script:update.File) {
+                Install-Update
+            }
         }
     }
     catch {
@@ -664,11 +815,186 @@ function Invoke-Reminder {
     }
 }
 
+function Show-TrayMessage {
+    param([string]$Text, [string]$Icon = 'Info')
+
+    if (-not $script:tray -or -not $script:tray.Visible) { return }
+    $script:tray.BalloonTipTitle = 'Juice Reminder'
+    $script:tray.BalloonTipText  = $Text
+    $script:tray.BalloonTipIcon  = $Icon
+    $script:tray.ShowBalloonTip(10000)
+}
+
+function Update-UpdateMenu {
+    if (-not $script:miInstall) { return }
+    $u = $script:update
+    $script:miInstall.Available = [bool]$u
+    if ($u) { $script:miInstall.Text = "Install update $($u.Version) now" }
+}
+
+function Start-UpdateCheck {
+    param([switch]$Manual)
+
+    if ($script:job -or $script:installing) { return }
+    $script:manualCheck     = [bool]$Manual
+    $script:nextUpdateCheck = (Get-Date).AddHours(24)
+    Start-BackgroundJob 'Fetch' @($script:appSettings.UpdateUrl)
+}
+
+function Start-UpdateDownload {
+    if ($script:job -or -not $script:update) { return }
+    $dest = Join-Path $UpdateDir ('JuiceReminderSetup-{0}.exe' -f $script:update.Version)
+    Write-Log "Downloading update v$($script:update.Version) from $($script:update.Url)."
+    Start-BackgroundJob 'Download' @($script:update.Url, $dest)
+}
+
+function Complete-UpdateCheck {
+    param($Result)
+
+    $manual = $script:manualCheck
+    $script:manualCheck = $false
+
+    if ($Result.Error) {
+        $script:nextUpdateCheck = (Get-Date).AddHours(6)
+        Write-Log "Update check failed: $($Result.Error)" 'WARN'
+        if ($manual) { Show-TrayMessage "Couldn't check for updates: $($Result.Error)" 'Warning' }
+        return
+    }
+
+    $m = Test-UpdateManifest ([string]$Result.Output) $AppVersion
+    if (-not $m.Ok) {
+        $script:nextUpdateCheck = (Get-Date).AddHours(6)
+        Write-Log "Update information rejected: $($m.Reason)." 'WARN'
+        if ($manual) { Show-TrayMessage "Couldn't check for updates: the update information was not valid." 'Warning' }
+        return
+    }
+    if (-not $m.Newer) {
+        Write-Log "Checked for updates: up to date (running v$AppVersion, latest v$($m.Version))."
+        if ($manual) { Show-TrayMessage "You have the latest version ($AppVersion)." }
+        return
+    }
+
+    # Same version already downloaded and verified: nothing new to do.
+    if ($script:update -and $script:update.Version -eq $m.Version -and $script:update.File) {
+        if ($manual) { Show-TrayMessage "Version $($m.Version) is ready to install. Right-click the tray icon and choose Install update." }
+        return
+    }
+
+    $script:update = $m
+    Write-Log "Update v$($m.Version) available (running v$AppVersion)."
+    Update-UpdateMenu
+
+    if ($script:appSettings.UpdateMode -eq 'Auto' -or $script:installWhenReady) {
+        Start-UpdateDownload
+    } else {
+        Show-TrayMessage "Version $($m.Version) is available. Right-click the tray icon and choose Install update."
+    }
+}
+
+function Complete-UpdateDownload {
+    param($Result)
+
+    $u = $script:update
+    if ($Result.Error) {
+        Write-Log "Update download failed: $($Result.Error)" 'WARN'
+        if ($script:installWhenReady) { Show-TrayMessage "Couldn't download the update: $($Result.Error)" 'Warning' }
+        $script:installWhenReady = $false
+        $script:nextUpdateCheck  = (Get-Date).AddHours(6)
+        return
+    }
+
+    $file = [string]$Result.Output
+    if (-not (Test-InstallerHash $file $u.Sha256)) {
+        Write-Log "Downloaded update v$($u.Version) does not match its SHA-256 checksum. Deleted it; not installing." 'ERROR'
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+        if ($script:installWhenReady) { Show-TrayMessage 'The downloaded update was damaged or tampered with, so it was not installed.' 'Error' }
+        $script:update           = $null
+        $script:installWhenReady = $false
+        $script:nextUpdateCheck  = (Get-Date).AddHours(6)
+        Update-UpdateMenu
+        return
+    }
+
+    $u.File = $file
+    Write-Log "Update v$($u.Version) downloaded and checksum verified: $file"
+    Update-UpdateMenu
+
+    if ($script:installWhenReady) {
+        Install-Update
+    } elseif ($script:appSettings.UpdateMode -eq 'Auto') {
+        Show-TrayMessage "Version $($u.Version) will install after your next reminder."
+    }
+}
+
+function Install-Update {
+    $u = $script:update
+    if (-not $u -or -not $u.File -or $script:installing) { return }
+
+    # Check again right before running it: the file sits in a user-writable folder.
+    if (-not (Test-InstallerHash $u.File $u.Sha256)) {
+        Write-Log "Update file $($u.File) changed since it was verified. Deleted it; not installing." 'ERROR'
+        Remove-Item -LiteralPath $u.File -Force -ErrorAction SilentlyContinue
+        $script:update = $null
+        Update-UpdateMenu
+        return
+    }
+
+    $setupLog = Join-Path $UpdateDir 'setup.log'
+    Write-Log "Installing update v$($u.Version). Setup's own log: $setupLog"
+    try {
+        Start-Process -FilePath $u.File -ErrorAction Stop -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/RESTARTAPP=1', "/LOG=`"$setupLog`"")
+    }
+    catch {
+        Write-Log "Could not start the update: $($_.Exception.Message)" 'ERROR'
+        return
+    }
+
+    # Setup stops this process and starts the new version. Hide the tray icon so
+    # it doesn't linger; Invoke-Tick brings it back if setup never gets that far.
+    $script:installing     = $true
+    $script:installStarted = Get-Date
+    $script:installWhenReady = $false
+    $script:tray.Visible   = $false
+}
+
+function Request-UpdateInstall {
+    <# The user asked to install now (tray menu or notification). #>
+    if (-not $script:update -or $script:installing) { return }
+    $script:installWhenReady = $true
+    if ($script:update.File) {
+        Install-Update
+    } else {
+        Show-TrayMessage "Downloading version $($script:update.Version)..."
+        Start-UpdateDownload   # if a check is still running, it downloads when that finishes
+    }
+}
+
+function Invoke-UpdateWork {
+    $res = Receive-BackgroundJob
+    if ($res) {
+        if ($res.Kind -eq 'Fetch') { Complete-UpdateCheck $res } else { Complete-UpdateDownload $res }
+    }
+
+    if ($script:installing -and ((Get-Date) - $script:installStarted).TotalMinutes -ge 3) {
+        $script:installing   = $false
+        $script:tray.Visible = $true
+        Write-Log "Update v$($script:update.Version) did not complete within 3 minutes; still running v$AppVersion. See $(Join-Path $UpdateDir 'setup.log')." 'WARN'
+    }
+
+    if ($script:appSettings.UpdateMode -ne 'Off' -and -not $script:job -and -not $script:installing -and
+        (Get-Date) -ge $script:nextUpdateCheck) {
+        Start-UpdateCheck
+    }
+}
+
 function Invoke-Tick {
     if ($script:busy) { return }
     try {
         Update-SettingsIfChanged
-        if (-not $script:paused -and (Get-Date) -ge (Get-NextDue)) {
+        # Update trouble must never stop reminders.
+        try { Invoke-UpdateWork } catch { Write-Log "Update step failed: $($_.Exception.Message)" 'ERROR' }
+        if (-not $script:installing -and -not $script:paused -and (Get-Date) -ge (Get-NextDue)) {
             Invoke-Reminder 'timer'
         }
     }
@@ -725,6 +1051,17 @@ try {
     $script:snoozed       = $false
     $script:paused        = $false
     $script:busy          = $false
+
+    $script:job              = $null
+    $script:update           = $null    # Test-UpdateManifest result, plus File once downloaded
+    $script:installWhenReady = $false
+    $script:manualCheck      = $false
+    $script:installing       = $false
+    $script:nextUpdateCheck  = (Get-Date).AddSeconds($UpdateCheckDelaySeconds)
+    # Installers left from earlier updates are no longer needed.
+    Get-ChildItem -LiteralPath $UpdateDir -Filter '*.exe' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+
     if ($StartDelaySeconds -gt 0) {
         $script:waitMinutes = $StartDelaySeconds / 60.0
         $script:snoozed     = $true   # keep the test delay even if settings change
@@ -742,7 +1079,18 @@ try {
     $miSettings.Font = New-Object System.Drawing.Font($miSettings.Font, [System.Drawing.FontStyle]::Bold)
     $miLog      = $menu.Items.Add('Open log folder')
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $script:miInstall = $menu.Items.Add('Install update')
+    $miCheck    = $menu.Items.Add('Check for updates')
+    [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     $miExit     = $menu.Items.Add('Exit')
+    Update-UpdateMenu
+
+    $script:miInstall.Add_Click({ Request-UpdateInstall })
+    $miCheck.Add_Click({
+        if ($script:job) { Show-TrayMessage 'Already checking for updates.'; return }
+        Write-Log 'Update check requested from the tray menu.'
+        Start-UpdateCheck -Manual
+    })
 
     $miNow.Add_Click({ if (-not $script:busy) { Invoke-Reminder 'from tray menu' } })
     $miSettings.Add_Click({ Open-SettingsFromTray })
@@ -770,6 +1118,13 @@ try {
     $script:tray.Icon = Get-AppIcon ([System.Windows.Forms.SystemInformation]::SmallIconSize)
     $script:tray.ContextMenuStrip = $menu
     $script:tray.Add_MouseDoubleClick({ Open-SettingsFromTray })
+    $script:tray.Add_BalloonTipClicked({
+        if (-not $script:update -or $script:installing -or $script:busy) { return }
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "Install Juice Reminder $($script:update.Version) now?`r`n`r`nThe reminder restarts by itself; your settings are kept.",
+            'Juice Reminder update', 'YesNo', 'Question')
+        if ($answer -eq 'Yes') { Request-UpdateInstall }
+    })
     Update-TrayText
     $script:tray.Visible = $true
 
@@ -789,6 +1144,7 @@ catch {
 finally {
     if ($script:timer) { $script:timer.Stop(); $script:timer.Dispose() }
     if ($script:tray)  { $script:tray.Visible = $false; $script:tray.Dispose() }
+    if ($script:job)   { try { $script:job.PS.Stop(); $script:job.PS.Dispose() } catch { } }
     Stop-ReminderSound
     Write-Log 'Stopped.'
     $mutex.ReleaseMutex()

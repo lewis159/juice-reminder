@@ -46,6 +46,8 @@ Right-click for:
   until you resume or sign out.
 - **Settings...** (also: double-click the icon)
 - **Open log folder**
+- **Install update X now** - only shown when a newer version has been found.
+- **Check for updates**
 - **Exit** - stops reminders until you next sign in or start it from the Start
   Menu.
 
@@ -59,6 +61,8 @@ settings**:
 - **Play a sound** - any sound from `C:\Windows\Media`, or **Browse...** for your
   own `.wav`, `.mp3`, `.wma` or `.m4a`. Set the volume, choose whether it keeps
   repeating until you click OK or Snooze, and use **Preview** to hear it.
+- **Updates** - Install automatically (default), Ask me first, or Don't check.
+  See [Updates](#updates).
 
 Changes apply to the running reminder within 15 seconds, no restart needed. A
 new interval counts from the last reminder, so shortening it can bring the next
@@ -74,13 +78,41 @@ edit by hand:
   "SoundEnabled": true,
   "SoundPath": "C:\\Windows\\Media\\Windows Notify System Generic.wav",
   "SoundVolume": 80,
-  "SoundRepeat": false
+  "SoundRepeat": false,
+  "UpdateMode": "Auto",
+  "UpdateUrl": "https://github.com/lewis159/juice-reminder/releases/latest/download/latest.json"
 }
 ```
+
+`UpdateMode` is `Auto`, `Notify` or `Off`. `UpdateUrl` is only in the file, not
+the window; it must be `https://`.
 
 `IntervalMinutes` must be 30, 60 or 120 and `SnoozeMinutes` 1 to 120; anything
 invalid is ignored (default used) and noted in the log. If the sound file is
 missing, the standard Windows chime plays instead.
+
+## Updates
+
+From 1.3.0 the app updates itself. (1.2.0 and older can't: install 1.3.0 by
+hand once.)
+
+- Two minutes after it starts, then once a day, it downloads `latest.json`
+  from the latest GitHub release. If that names a newer version, it downloads
+  the installer to `%TEMP%\JuiceReminderUpdate` and checks its SHA-256 against
+  the one in `latest.json`. A mismatch is logged and the file is deleted.
+- **Install automatically:** the update installs silently right after you next
+  click **OK** on a reminder, so a restart never cuts a wait short. Setup stops
+  the old version and starts the new one; settings are kept.
+- **Ask me first:** a notification says a new version is available. Click it,
+  or right-click the tray icon → **Install update X now**.
+- **Don't check:** no automatic checks. **Check for updates** in the tray menu
+  still works.
+- A failed check or download is logged and retried after 6 hours. Setup's own
+  log is `%TEMP%\JuiceReminderUpdate\setup.log`.
+
+The download is only trusted as far as the GitHub release is: the checksum
+proves the file arrived intact, not who built it. Code signing would close
+that gap.
 
 ## Log
 
@@ -142,7 +174,11 @@ It stops the running reminder and removes the login entry.
 
 Script switches: `-TestNow` (one popup), `-Settings` (settings window),
 `-SettingsPath` / `-LogDir` (use other files, handy for testing) and
-`-StartDelaySeconds N` (first reminder after N seconds). Dot-sourcing the script
+`-StartDelaySeconds N` (first reminder after N seconds) and
+`-UpdateCheckDelaySeconds N` (first update check after N seconds, default 120).
+To test updates locally, point `UpdateUrl` in a test settings file at
+`http://localhost:<port>/latest.json` (plain http is allowed only for
+localhost). Dot-sourcing the script
 (`. .\JuiceReminder.ps1`) loads its functions without starting it.
 
 Build (needs Inno Setup 6):
@@ -152,5 +188,15 @@ winget install --id JRSoftware.InnoSetup
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Installer.ps1
 ```
 
-To release: bump `$AppVersion`, build, commit, then
-`gh release create vX.Y.Z dist\JuiceReminderSetup.exe`.
+The build also writes `dist\latest.json` (version, download URL, SHA-256;
+pass `-Notes "..."` to include notes).
+
+To release: bump `$AppVersion`, build, commit and push, then upload **both**
+files, or installed copies won't see the update:
+
+```powershell
+gh release create vX.Y.Z dist\JuiceReminderSetup.exe dist\latest.json
+```
+
+The release must be marked Latest (the default) for
+`releases/latest/download/latest.json` to point at it.

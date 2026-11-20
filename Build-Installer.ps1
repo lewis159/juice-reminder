@@ -8,7 +8,13 @@
 [CmdletBinding()]
 param(
     # Path to ISCC.exe, if it is not in one of the usual places.
-    [string]$Iscc
+    [string]$Iscc,
+
+    # Short release notes for dist\latest.json (shown nowhere yet; kept for later).
+    [string]$Notes = '',
+
+    # GitHub repo the release is published to; used for the download URL in latest.json.
+    [string]$Repo = 'lewis159/juice-reminder'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +44,22 @@ $version = $Matches[1]
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE." }
 
 $setup = Join-Path $root 'dist\JuiceReminderSetup.exe'
+$hash  = (Get-FileHash $setup -Algorithm SHA256).Hash
+
+# Update manifest the app reads from releases/latest/download/latest.json.
+# Upload it to the same release as the installer.
+$manifest = [ordered]@{
+    version   = $version
+    url       = "https://github.com/$Repo/releases/download/v$version/JuiceReminderSetup.exe"
+    sha256    = $hash
+    notes     = $Notes
+    published = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+}
+$manifestPath = Join-Path $root 'dist\latest.json'
+[IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+
 Write-Host ""
 Write-Host "Built $setup v$version ($([math]::Round((Get-Item $setup).Length / 1MB, 2)) MB)"
-Write-Host "SHA-256 $((Get-FileHash $setup -Algorithm SHA256).Hash)"
+Write-Host "SHA-256 $hash"
+Write-Host "Wrote $manifestPath"
+Write-Host "Release: gh release create v$version dist\JuiceReminderSetup.exe dist\latest.json"

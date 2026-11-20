@@ -67,6 +67,10 @@ Name: "{localappdata}\JuiceReminder\logs"; Flags: uninsneveruninstall
 [Run]
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#LauncherVbs}"""; WorkingDir: "{app}"; \
     Description: "Start Juice Reminder now"; Flags: nowait postinstall skipifsilent
+; Self-update: the app runs setup with /VERYSILENT /RESTARTAPP=1, and this starts
+; the new version once the files are in place.
+Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#LauncherVbs}"""; WorkingDir: "{app}"; \
+    Flags: nowait; Check: ShouldRestartApp
 
 [UninstallDelete]
 Type: files; Name: "{userstartup}\{#AppName}.lnk"
@@ -85,6 +89,11 @@ begin
       ' -Version "{#AppVersion}"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     Log('SetupHelper could not be started: ' + SysErrorMessage(ResultCode));
+end;
+
+function ShouldRestartApp: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RESTARTAPP|0}') = '1');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

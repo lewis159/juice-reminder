@@ -25,6 +25,11 @@ is Windows 11). Read `README.md` first, then the files it lists.
 - It logs to `%LocalAppData%\JuiceReminder\logs\juice-reminder.log` (start,
   each popup, button pressed and how long it took, settings changes, stop,
   errors; rolls over at 1 MB). Before 1.2.0 the log was in `C:\JuiceReminder\logs`.
+- It updates itself (from 1.3.0): checks `latest.json` on the latest GitHub
+  release 2 min after start and daily, downloads the installer, verifies its
+  SHA-256, and runs it with `/VERYSILENT /RESTARTAPP=1` (Auto: after the next
+  OK click; Notify: when the user clicks Install). Network work runs in a
+  background runspace polled by the 15 s timer.
 - It ships as `JuiceReminderSetup.exe`, a per-user Inno Setup installer (no UAC)
   that installs to `%LocalAppData%\Programs\Juice Reminder`, adds Start Menu
   entries, an Add/Remove Programs uninstaller, and an optional Startup shortcut.
@@ -74,6 +79,14 @@ is Windows 11). Read `README.md` first, then the files it lists.
 - Test the tray app headlessly with `-SettingsPath`, `-LogDir` and
   `-StartDelaySeconds`; the popup's buttons can be clicked with `BM_CLICK` on
   their window handles (UI Automation sees them as panes, not buttons).
+  Stop the installed copy first: it holds the single-instance lock, so a test
+  copy would just log "already running" and exit.
+- Test updates with a local `HttpListener` on `http://localhost:<port>/`
+  serving `latest.json` and the installer, and `UpdateUrl` pointing at it
+  (plain http is allowed only for loopback). `-UpdateCheckDelaySeconds 5`
+  makes the first check quick.
+- Every release must upload `dist\latest.json` as well as the installer, or
+  installed copies never see it.
 
 ## How I want you to work
 
@@ -85,8 +98,8 @@ is Windows 11). Read `README.md` first, then the files it lists.
 - Bump `$AppVersion` (semver) for each release. Commit with Conventional Commits
   messages and push to `main`.
 - You're pre-authorised to create a GitHub release for each new build
-  (`gh release create vX.Y.Z dist\JuiceReminderSetup.exe`) with short notes and
-  the SHA-256. Ask before anything else outward-facing, like changing repo
+  (`gh release create vX.Y.Z dist\JuiceReminderSetup.exe dist\latest.json`)
+  with short notes and the SHA-256. Ask before anything else outward-facing, like changing repo
   visibility or deleting releases.
 - Keep README.md and this prompt up to date when behaviour changes.
 
