@@ -30,6 +30,12 @@ is Windows 11). Read `README.md` first, then the files it lists.
   SHA-256, and runs it with `/VERYSILENT /RESTARTAPP=1` (Auto: after the next
   OK click; Notify: when the user clicks Install). Network work runs in a
   background runspace polled by the 15 s timer.
+- From 1.4.0 the installer is Authenticode-signed with a self-signed
+  certificate (`CN=Juice Reminder Release Signing`, thumbprint
+  `4D1E8C6F2D423271B9A0E70A3127F38A353C63B2`) whose key is in
+  `Cert:\CurrentUser\My` on the release machine. `Build-Installer.ps1` signs
+  before hashing. The updater only installs files signed by a thumbprint in
+  `$TrustedSignerThumbprints` (`JuiceReminder.ps1`).
 - It ships as `JuiceReminderSetup.exe`, a per-user Inno Setup installer (no UAC)
   that installs to `%LocalAppData%\Programs\Juice Reminder`, adds Start Menu
   entries, an Add/Remove Programs uninstaller, and an optional Startup shortcut.
@@ -87,6 +93,13 @@ is Windows 11). Read `README.md` first, then the files it lists.
   makes the first check quick.
 - Every release must upload `dist\latest.json` as well as the installer, or
   installed copies never see it.
+- A file signed by our self-signed certificate reports `Get-AuthenticodeSignature`
+  status `UnknownError` (untrusted root), not `Valid`; that's expected and
+  `Test-InstallerSignature` accepts it only for a pinned, self-issued signer. A
+  changed file reports `HashMismatch`. Don't "fix" this by requiring `Valid`.
+- Never release an `-AllowUnsigned` build, never commit a `.pfx`, and never
+  remove the current thumbprint from `$TrustedSignerThumbprints` without
+  shipping its replacement first (see README "Signing key").
 
 ## How I want you to work
 

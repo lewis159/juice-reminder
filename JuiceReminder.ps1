@@ -36,7 +36,15 @@ param(
 )
 
 # Read by Build-Installer.ps1 to stamp the installer version.
-$AppVersion = '1.3.0'
+$AppVersion = '1.4.0'
+
+# Updates are only installed if the installer is Authenticode-signed by one of
+# these certificates (SHA-1 thumbprints). The key lives on the release machine;
+# see tools\New-SigningCert.ps1. To move to a new certificate, ship a release
+# signed with the old one that lists both, then sign with the new one.
+$TrustedSignerThumbprints = @(
+    '4D1E8C6F2D423271B9A0E70A3127F38A353C63B2'   # CN=Juice Reminder Release Signing (self-signed, 2026-2036)
+)
 
 # Where the app looks for updates. Build-Installer.ps1 writes latest.json and it
 # is uploaded with each GitHub release; this URL always serves the newest one.
@@ -238,6 +246,41 @@ function Test-UpdateManifest {
     if ($m.notes) { $r.Notes = [string]$m.notes }
     $r.Newer   = $v -gt [version]$CurrentVersion
     return $r
+}
+
+function Test-InstallerSignature {
+    <#
+        Returns $null if the file is signed by a trusted certificate (see
+        $TrustedSignerThumbprints) and unchanged since signing, otherwise the
+        reason it isn't. Never throws.
+    #>
+    param([string]$Path)
+
+    try { $sig = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop }
+    catch { return "could not read its signature ($($_.Exception.Message))" }
+
+    $cert = $sig.SignerCertificate
+    if ($sig.Status -eq 'NotSigned' -or -not $cert) { return 'it is not signed' }
+    if ($sig.Status -eq 'HashMismatch') { return 'it was changed after it was signed' }
+    if ($TrustedSignerThumbprints -notcontains $cert.Thumbprint) {
+        return "it is signed by an unknown certificate ($($cert.Subject), $($cert.Thumbprint))"
+    }
+    if ($sig.Status -eq 'Valid') { return $null }
+
+    # Our certificate is self-signed, so Windows reports an untrusted root
+    # (UnknownError) unless it was added to this PC's trusted roots. The file's
+    # digest has still been checked: a changed file gives HashMismatch instead.
+    if ($sig.Status -eq 'UnknownError' -and $cert.Subject -eq $cert.Issuer) { return $null }
+
+    return "its signature is not valid ($($sig.Status): $($sig.StatusMessage))"
+}
+
+function Test-UpdateFile {
+    <# Checksum and signature together. Returns $null if both pass, else the reason. #>
+    param([string]$Path, [string]$Sha256)
+
+    if (-not (Test-InstallerHash $Path $Sha256)) { return 'it does not match its SHA-256 checksum' }
+    return Test-InstallerSignature $Path
 }
 
 function Test-InstallerHash {
@@ -904,8 +947,9 @@ function Complete-UpdateDownload {
     }
 
     $file = [string]$Result.Output
-    if (-not (Test-InstallerHash $file $u.Sha256)) {
-        Write-Log "Downloaded update v$($u.Version) does not match its SHA-256 checksum. Deleted it; not installing." 'ERROR'
+    $problem = Test-UpdateFile $file $u.Sha256
+    if ($problem) {
+        Write-Log "Downloaded update v$($u.Version) rejected: $problem. Deleted it; not installing." 'ERROR'
         Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
         if ($script:installWhenReady) { Show-TrayMessage 'The downloaded update was damaged or tampered with, so it was not installed.' 'Error' }
         $script:update           = $null
@@ -916,7 +960,7 @@ function Complete-UpdateDownload {
     }
 
     $u.File = $file
-    Write-Log "Update v$($u.Version) downloaded and checksum verified: $file"
+    Write-Log "Update v$($u.Version) downloaded; checksum and signature verified: $file"
     Update-UpdateMenu
 
     if ($script:installWhenReady) {
@@ -931,8 +975,9 @@ function Install-Update {
     if (-not $u -or -not $u.File -or $script:installing) { return }
 
     # Check again right before running it: the file sits in a user-writable folder.
-    if (-not (Test-InstallerHash $u.File $u.Sha256)) {
-        Write-Log "Update file $($u.File) changed since it was verified. Deleted it; not installing." 'ERROR'
+    $problem = Test-UpdateFile $u.File $u.Sha256
+    if ($problem) {
+        Write-Log "Update file $($u.File) failed its re-check before installing: $problem. Deleted it; not installing." 'ERROR'
         Remove-Item -LiteralPath $u.File -Force -ErrorAction SilentlyContinue
         $script:update = $null
         Update-UpdateMenu

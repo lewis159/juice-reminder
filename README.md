@@ -16,8 +16,9 @@ run it.
 - Adds a Start Menu group (reminder, settings, log folder, uninstall) and an
   entry in Add/Remove Programs.
 - "Start automatically when I log in" is ticked by default.
-- The installer is unsigned, so SmartScreen may say "unknown publisher":
-  choose **More info**, then **Run anyway**.
+- The installer is signed with the project's own (self-signed) certificate,
+  which Windows doesn't know, so SmartScreen may still say "unknown publisher":
+  choose **More info**, then **Run anyway**. See [Code signing](#code-signing).
 
 ### Upgrading
 
@@ -98,8 +99,14 @@ hand once.)
 
 - Two minutes after it starts, then once a day, it downloads `latest.json`
   from the latest GitHub release. If that names a newer version, it downloads
-  the installer to `%TEMP%\JuiceReminderUpdate` and checks its SHA-256 against
-  the one in `latest.json`. A mismatch is logged and the file is deleted.
+  the installer to `%TEMP%\JuiceReminderUpdate` and checks two things (again
+  right before running it):
+  - its SHA-256 matches the one in `latest.json`, and
+  - from 1.4.0, it is signed by the Juice Reminder signing certificate and
+    hasn't been changed since (see [Code signing](#code-signing)).
+
+  If either check fails, the file is deleted, nothing is installed, and the
+  reason is logged.
 - **Install automatically:** the update installs silently right after you next
   click **OK** on a reminder, so a restart never cuts a wait short. Setup stops
   the old version and starts the new one; settings are kept.
@@ -110,9 +117,38 @@ hand once.)
 - A failed check or download is logged and retried after 6 hours. Setup's own
   log is `%TEMP%\JuiceReminderUpdate\setup.log`.
 
-The download is only trusted as far as the GitHub release is: the checksum
-proves the file arrived intact, not who built it. Code signing would close
-that gap.
+## Code signing
+
+From 1.4.0, `JuiceReminderSetup.exe` is Authenticode-signed with a
+self-signed certificate, `CN=Juice Reminder Release Signing`, thumbprint
+`4D1E8C6F2D423271B9A0E70A3127F38A353C63B2`. Its private key exists only on the
+release machine.
+
+The app has that thumbprint built in and only installs updates signed with it.
+So even someone who takes over the GitHub account or release can't push a
+working bad update: they can't sign it. (1.3.0 and older only check the
+checksum, which doesn't protect against that.)
+
+Because the certificate isn't from a public authority, Windows itself doesn't
+trust it, and SmartScreen still warns on first download. That doesn't affect
+updates.
+
+**On a PC that uses Juice Reminder, nothing is needed.** Optionally, to make
+Windows show "Juice Reminder Release Signing" as the publisher instead of
+"Unknown", install the public certificate (`assets\juice-signing.cer`, in the
+repo) from a copy of the repo:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Install-SigningCert.ps1
+```
+
+Windows asks you to confirm; check the thumbprint above. `-Remove` undoes it.
+This makes Windows trust anything signed with that key, for that user.
+
+**On a PC that builds releases**, the private key is needed. See
+[Signing key](#signing-key).
+
+## Log
 
 ## Log
 
@@ -169,6 +205,9 @@ It stops the running reminder and removes the login entry.
 | `installer\JuiceReminder.iss` | Inno Setup script. |
 | `installer\SetupHelper.ps1` | Run by setup/uninstall: stops running copies, removes the old script install, logs. |
 | `tools\New-JuiceIcon.ps1` | Draws `assets\juice.ico`, so no binary artwork lives in the repo. |
+| `tools\New-SigningCert.ps1` | Creates the signing certificate (once), or backs up its key to a `.pfx` (`-Backup`). |
+| `tools\Install-SigningCert.ps1` | Optional, for user PCs: trusts the public certificate so Windows shows the publisher name. |
+| `assets\juice-signing.cer` | The signing certificate's public half (no private key). |
 | `Build-Installer.ps1` | Builds `dist\JuiceReminderSetup.exe`. |
 | `docs\claude-prompt.md` | Prompt to hand a new Claude session working on this project. |
 
@@ -188,8 +227,36 @@ winget install --id JRSoftware.InnoSetup
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Installer.ps1
 ```
 
-The build also writes `dist\latest.json` (version, download URL, SHA-256;
-pass `-Notes "..."` to include notes).
+The build signs the installer with the certificate in `Cert:\CurrentUser\My`
+(and timestamps it via DigiCert, falling back to Sectigo), then writes
+`dist\latest.json` (version, download URL, SHA-256 of the signed file; pass
+`-Notes "..."` to include notes). Without the certificate it stops; add
+`-AllowUnsigned` for a local test build, which installed copies will refuse as
+an update.
+
+### Signing key
+
+The private key is in this PC's certificate store (current user). **Back it
+up** off this PC, e.g. to a USB stick or password manager; you choose the
+password when asked:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\New-SigningCert.ps1 -Backup -Thumbprint 4D1E8C6F2D423271B9A0E70A3127F38A353C63B2 -PfxPath E:\juice-signing.pfx
+```
+
+To build releases on another PC, import that file there:
+
+```powershell
+Import-PfxCertificate -FilePath E:\juice-signing.pfx -CertStoreLocation Cert:\CurrentUser\My -Password (Read-Host -AsSecureString)
+```
+
+Never commit the `.pfx` (`.gitignore` blocks `*.pfx`). If the key is lost,
+installed copies can't be updated any more: people must install the next
+version by hand. If it leaks, anyone can sign updates: make a new certificate,
+ship a release signed with the old key whose `$TrustedSignerThumbprints` has
+only the new thumbprint, then sign with the new one. To change certificates
+(e.g. to a paid one), ship one release signed with the old key that lists
+both thumbprints first.
 
 To release: bump `$AppVersion`, build, commit and push, then upload **both**
 files, or installed copies won't see the update:

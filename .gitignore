@@ -3,6 +3,11 @@ Thumbs.db
 desktop.ini
 *.lnk
 
+# Signing key backups must never be committed (assets\juice-signing.cer is the
+# public half and is meant to be in the repo).
+*.pfx
+*.p12
+
 # Build output
 dist/
 assets/juice.ico
