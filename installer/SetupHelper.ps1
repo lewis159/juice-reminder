@@ -22,8 +22,11 @@ param(
 
     [string]$Version = '',
 
-    [string]$LogDir = 'C:\JuiceReminder\logs'
+    # Default: %LocalAppData%\JuiceReminder\logs (same as JuiceReminder.ps1).
+    [string]$LogDir
 )
+
+if (-not $LogDir) { $LogDir = Join-Path $env:LOCALAPPDATA 'JuiceReminder\logs' }
 
 function Write-Log {
     param(

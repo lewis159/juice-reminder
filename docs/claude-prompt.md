@@ -12,12 +12,19 @@ is Windows 11). Read `README.md` first, then the files it lists.
 
 ## What it does
 
-- Every 60 minutes it shows an always-on-top, centered popup: a drawn glass of
-  juice, "Time for a drink of your juice", and two buttons, **OK** (next reminder
-  in 60 min) and **Snooze 10 min**. No close button. A soft system chime plays.
-- It starts at login and runs silently in the background, one instance only.
-- It logs to `C:\JuiceReminder\logs\juice-reminder.log` (start, each popup,
-  button pressed and how long it took, stop, errors; rolls over at 1 MB).
+- Every 30 min, 1 hour or 2 hours (user's choice) it shows an always-on-top,
+  centered popup: a drawn glass of juice, "Time for a drink of your juice", and
+  two buttons, **OK** (next reminder after a full interval) and **Snooze N min**.
+  No close button. A configurable sound plays (Windows sound or the user's own
+  file, volume, optional repeat until dismissed).
+- It starts at login and sits in the system tray (Remind me now, Pause,
+  Settings..., Open log folder, Exit), one instance per user.
+- Settings live in `%AppData%\JuiceReminder\settings.json`, edited through a
+  settings window (tray, Start Menu, or `-Settings`). The running app re-reads
+  the file within 15 s of it changing.
+- It logs to `%LocalAppData%\JuiceReminder\logs\juice-reminder.log` (start,
+  each popup, button pressed and how long it took, settings changes, stop,
+  errors; rolls over at 1 MB). Before 1.2.0 the log was in `C:\JuiceReminder\logs`.
 - It ships as `JuiceReminderSetup.exe`, a per-user Inno Setup installer (no UAC)
   that installs to `%LocalAppData%\Programs\Juice Reminder`, adds Start Menu
   entries, an Add/Remove Programs uninstaller, and an optional Startup shortcut.
@@ -54,6 +61,19 @@ is Windows 11). Read `README.md` first, then the files it lists.
 - `-TestNow` must not take the single-instance mutex, or the preview silently
   does nothing while the real reminder runs.
 - Logging must never throw. Wrap it and swallow failures.
+- WinForms event handlers find the form's controls through PowerShell's
+  dynamic scoping, which only works while the function that called
+  `ShowDialog()` is still running. Keep "build the form" and "show it" in one
+  function, and don't use `GetNewClosure()`: closures can't see the script's
+  functions or `$script:` variables.
+- Don't name a script-scope variable after a script parameter, even with a
+  `$script:` prefix (`$script:settings` is the `[switch]$Settings` parameter and
+  assigning an object to it crashes). App state is `$script:appSettings`.
+- Don't wait with `Start-Sleep` for a whole interval: sleep timers pause while
+  the PC sleeps. The tray app checks the clock on a 15 s WinForms timer.
+- Test the tray app headlessly with `-SettingsPath`, `-LogDir` and
+  `-StartDelaySeconds`; the popup's buttons can be clicked with `BM_CLICK` on
+  their window handles (UI Automation sees them as panes, not buttons).
 
 ## How I want you to work
 

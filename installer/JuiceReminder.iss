@@ -51,15 +51,18 @@ Source: "{#HelperScript}";             DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#LauncherVbs}"""; \
-    WorkingDir: "{app}"; IconFilename: "{app}\juice.ico"; Comment: "Hourly reminder to drink your juice"
-Name: "{group}\Juice Reminder log"; Filename: "C:\JuiceReminder\logs"; Comment: "Folder containing juice-reminder.log"
+    WorkingDir: "{app}"; IconFilename: "{app}\juice.ico"; Comment: "Reminder to drink your juice"
+Name: "{group}\Juice Reminder settings"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#LauncherVbs}"" -Settings"; \
+    WorkingDir: "{app}"; IconFilename: "{app}\juice.ico"; Comment: "How often to remind you, and which sound to play"
+Name: "{group}\Juice Reminder log"; Filename: "{localappdata}\JuiceReminder\logs"; Comment: "Folder containing juice-reminder.log"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{userstartup}\{#AppName}"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#LauncherVbs}"""; \
     WorkingDir: "{app}"; IconFilename: "{app}\juice.ico"; Tasks: startupicon
 
 [Dirs]
 ; Logs are user data: created here, deliberately left behind on uninstall.
-Name: "C:\JuiceReminder\logs"; Flags: uninsneveruninstall
+; (Settings live in %AppData%\JuiceReminder and are also kept.)
+Name: "{localappdata}\JuiceReminder\logs"; Flags: uninsneveruninstall
 
 [Run]
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#LauncherVbs}"""; WorkingDir: "{app}"; \
@@ -70,7 +73,7 @@ Type: files; Name: "{userstartup}\{#AppName}.lnk"
 
 [Code]
 { SetupHelper.ps1 does the real work (stopping running copies, removing the old
-  script-based install) and logs it to C:\JuiceReminder\logs. }
+  script-based install) and logs it to %LocalAppData%\JuiceReminder\logs. }
 procedure RunSetupHelper(const ScriptPath, Action: String);
 var
   ResultCode: Integer;
