@@ -104,6 +104,18 @@ is Windows 11). Read `README.md` first, then the files it lists.
 - Never release an `-AllowUnsigned` build, never commit a `.pfx`, and never
   remove the current thumbprint from `$TrustedSignerThumbprints` without
   shipping its replacement first (see README "Signing key").
+- Commands run from the Claude desktop app see a private copy of the registry
+  (and of some `%LocalAppData%` / `%AppData%` folders): writes land there and
+  Windows never sees them. An install run straight from Claude's shell, or
+  anything it starts (including the reminder and its self-updates), leaves no
+  real uninstall entry, so the app is missing from Settings > Installed apps
+  and `winget list`. This happened on 2026-11-27. To install or test for real,
+  launch outside the sandbox through WMI, e.g.
+  `Invoke-CimMethod Win32_Process -MethodName Create -Arguments @{ CommandLine = '"...\JuiceReminderSetup.exe" /VERYSILENT /SUPPRESSMSGBOXES /RESTARTAPP=1' }`.
+  Check the real registry the same way (`cmd /c reg query ... > C:\dev\out.txt`),
+  not with `Get-ItemProperty`. Settings, `winget` and a WMI-launched
+  `reg query` show the truth; Control Panel's Programs and Features opened from
+  Claude's shell does not.
 
 ## How I want you to work
 
